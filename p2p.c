@@ -775,7 +775,29 @@ void * handle_others_packet(void * arg)
     int file_pkt_idx;
     char content[info->file_head->sg_size];
     
-    
+    while(1)
+    {
+        recv_len = 0;
+        recv_cnt = 0;
+        read(sock, &read_size, sizeof(int));
+        read(sock, &file_pkt_idx, sizeof(int));
+        
+        while(recv_len < read_size)
+        {
+            recv_cnt = read(sock, &content[recv_len], read_size - recv_len);
+            recv_len += recv_cnt;
+        }
+
+        if(file_pkt_idx == -1)
+            break;
+
+        pthread_mutex_lock(&mutex);
+        info->file_body[file_pkt_idx]->peace_of_file_idx = file_pkt_idx;
+        info->file_body[file_pkt_idx]->this_size = read_size;
+        memcpy(info->file_body[file_pkt_idx]->content, content, read_size);
+        pthread_mutex_unlock(&mutex);
+    }
+}
 
 void error_handling(char * message)
 {
