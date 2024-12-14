@@ -5,6 +5,11 @@
 #include <errno.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <dirent.h>
+#include <pwd.h>
+#include <grp.h>
+#include <time.h>
+#include <sys/stat.h>
 #include <pthread.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -20,6 +25,7 @@ typedef struct
 
 void setup_socket(int * sock, struct sockaddr_in * serv_addr, const char * ip, int port);
 void error_handling(char * msg);
+void ls_command();
 void * send_msg(void * arg);
 void * recv_msg(void * arg);
 
@@ -76,11 +82,12 @@ int main(int argc, char * argv[])
 
     const char * direction = "\n< Command >\n"
                              "1. list up the participants\n"
-                             "2. exit\n";
+                             "2. ls\n"
+                             "3. exit\n";
     printf("%s", direction);
 
     pthread_create(&send_thread, NULL, send_msg, (void*)&clnt_info);
-    pthread_create(&recv_thread, NULL, recv_msg, (void*)&ssl);
+    pthread_create(&recv_thread, NULL, recv_msg, (void*)&clnt_info);
     pthread_join(send_thread, NULL);
     pthread_join(recv_thread, NULL);
 
@@ -90,18 +97,21 @@ int main(int argc, char * argv[])
     close(sock);
     return 0;
 }
+
 void * send_msg(void * arg)
 {
-    clnt_info_pkt * clnt_info = (clnt_info_pkt*)arg;
+    clnt_info_pkt * clnt_info;
     SSL * ssl;
     char name[NAME_SIZE];
 
+    clnt_info = (clnt_info_pkt*)arg;
     ssl = clnt_info->ssl;
     strcpy(name, clnt_info->name);
 
     char * command = (char *)malloc(BUF_SIZE);
     while(1)
     {
+        usleep(100000); // For alignment
         printf("[%s] ", name);
         fgets(command, BUF_SIZE, stdin);
         command[strlen(command) - 1] = '\0';
@@ -109,36 +119,132 @@ void * send_msg(void * arg)
         if(strcmp(command, "1") == 0)
         {
             SSL_write(ssl, "Show the paticipants", strlen("Show the paticipants"));
+            usleep(100000); // For alignment
+            continue;
         }
-        else if(strcmp(command, "2") == 0)
+        else if(strcmp(command, "2") == 0 || strcmp(command, "ls") == 0)
+        {
+            ls_command();
+            continue;
+        }
+        else if(strcmp(command, "3") == 0 || strcmp(command, "exit") == 0)
         {
             SSL_write(ssl, "exit", strlen("exit"));
             break;
         }
         else
         {
-            SSL_write(ssl, command, strlen(command));
+            if(strncmp(command, "file_share:", 11) == 0)
+            {
+
+                SSL_write(ssl, "file_share", strlen("file_share"));
+
+                // Send file name
+                const char * file_name = command + 11;
+                printf("file_name : %s\n", file_name);
+                SSL_write(ssl, file_name, strlen(file_name));
+
+                // Send file size
+                struct stat sb;
+                stat(file_name, &sb);
+                int file_size = sb.st_size;
+                SSL_write(ssl, &file_size, sizeof(file_size));
+
+                FILE * fp;
+                if((fp = fopen(file_name, "rb")) != NULL)
+                {
+                    while(1)
+                    {
+                        char buf[BUF_SIZE];
+                        memset(buf, 0, BUF_SIZE);
+
+                        int read_len = fread(buf, 1, BUF_SIZE, fp);
+                        if(read_len < BUF_SIZE)
+                        {
+                            SSL_write(ssl, buf, read_len);
+                            break;
+                        }
+                        SSL_write(ssl, buf, BUF_SIZE);
+                    }
+                    fclose(fp);
+                }
+                else
+                {
+                    printf("File open error\n");
+                }
+            }
+            else
+            {
+                SSL_write(ssl, command, strlen(command));
+            }
         }
     }
     return NULL;
 }
+
 void * recv_msg(void * arg)
 {
-    SSL ** ssl_ptr = (SSL**)arg;
-    SSL * ssl = *ssl_ptr;
-    char msg[BUF_SIZE];
+    clnt_info_pkt * clnt_info;
+    SSL * ssl;
     int str_len;
+    char msg[BUF_SIZE];
+
+    clnt_info = (clnt_info_pkt*)arg;
+    ssl = clnt_info->ssl;
 
     while(1)
     {
         memset(msg, 0, BUF_SIZE);
         str_len = SSL_read(ssl, msg, BUF_SIZE - 1);
         if(str_len <= 0)
-        {
             return NULL;
+
+        if(strcmp(msg, "List") == 0)
+        {
+            printf("-----------------------------------\n");
+            printf("\tList of participants\n");
+            printf("-----------------------------------\n");
+            continue;
         }
-        msg[str_len] = '\0';
-        printf("%s", msg);
+        else if(strcmp(msg, "Someone joined") == 0)
+        {
+            printf("\n");
+        }
+        else if(strcmp(msg, "file_share") == 0)
+        {
+            char file_name[BUF_SIZE];
+            SSL_read(ssl, file_name, BUF_SIZE);
+
+            int file_size;
+            SSL_read(ssl, &file_size, sizeof(file_size));
+
+            FILE * fp;
+            if((fp = fopen(file_name, "wb")) != NULL)
+            {
+                char buf[BUF_SIZE];
+                while(1)
+                {
+                    int read_len;
+                    read_len = SSL_read(ssl, buf, BUF_SIZE - 1);
+                    if(read_len <= 0) 
+                        break;
+                    fwrite(buf, 1, read_len, fp);
+                    file_size -= read_len;
+                    if(file_size <= 0)
+                        break;
+                }
+                fclose(fp);
+            }
+            else
+            {
+                error_handling("Failed to download the file");
+            }
+        }
+        else
+        {
+            msg[str_len] = '\0';
+            printf("%s", msg);
+        }
     }
 }
 
@@ -153,6 +259,62 @@ void setup_socket(int * sock, struct sockaddr_in * serv_addr, const char * ip, i
 
     if(connect(*sock, (struct sockaddr*)serv_addr, sizeof(*serv_addr)) == -1)
         error_handling("connect() error");
+}
+
+void ls_command()
+{
+    DIR * dp;
+    struct dirent * dir;
+    struct stat sb;
+
+    if((dp = opendir(".")) == NULL)
+    {
+        perror("directory open error\n");
+        exit(1);
+    }
+
+    while((dir = readdir(dp)) != NULL)
+    {
+        if(stat(dir->d_name, &sb) == -1)
+        {
+            printf("%s stat error\n", dir->d_name);
+            exit(-1);
+        }
+
+        if((dir->d_ino == 0) || !(strcmp(dir->d_name, ".")) || !(strcmp(dir->d_name,"..")) || !(strcmp(dir->d_name, ".DS_Store")))
+            continue;
+
+        if(!S_ISREG(sb.st_mode))
+            continue;
+
+        // File type
+        printf("%c%c%c%c%c%c%c%c%c%c ",
+            (S_ISDIR(sb.st_mode)) ? 'd' : '-',
+            (sb.st_mode & S_IRUSR) ? 'r' : '-',
+            (sb.st_mode & S_IWUSR) ? 'w' : '-',
+            (sb.st_mode & S_IXUSR) ? 'x' : '-',
+            (sb.st_mode & S_IRGRP) ? 'r' : '-',
+            (sb.st_mode & S_IWGRP) ? 'w' : '-',
+            (sb.st_mode & S_IXGRP) ? 'x' : '-',
+            (sb.st_mode & S_IROTH) ? 'r' : '-',
+            (sb.st_mode & S_IWOTH) ? 'w' : '-',
+            (sb.st_mode & S_IXOTH) ? 'x' : '-');
+        
+        // File link count
+        printf("%3d ", (int)sb.st_nlink);
+
+        // File owner & group
+        printf("%s %s ", getpwuid(sb.st_uid)->pw_name, getgrgid(sb.st_gid)->gr_name);
+        printf("%8lld ", (long long)sb.st_size);
+
+        // Creation time
+        char time_str[26];
+        strftime(time_str, sizeof(time_str), "%b %d %H:%M", localtime(&sb.st_mtime));
+        printf("%s ", time_str);
+
+        // File name
+        printf("%s\n", dir->d_name);
+    }
 }
 
 void error_handling(char * msg)
