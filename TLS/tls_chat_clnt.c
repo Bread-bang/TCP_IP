@@ -112,7 +112,8 @@ void * send_msg(void * arg)
     while(1)
     {
         usleep(100000); // For alignment
-        printf("[%s] ", name);
+        // printf("[%s] ", name);
+
         fgets(command, BUF_SIZE, stdin);
         command[strlen(command) - 1] = '\0';
 
@@ -195,6 +196,7 @@ void * recv_msg(void * arg)
     while(1)
     {
         memset(msg, 0, BUF_SIZE);
+        fflush(stdout);
         str_len = SSL_read(ssl, msg, BUF_SIZE - 1);
         if(str_len <= 0)
             return NULL;
@@ -204,11 +206,26 @@ void * recv_msg(void * arg)
             printf("-----------------------------------\n");
             printf("\tList of participants\n");
             printf("-----------------------------------\n");
+            fflush(stdout);
             continue;
         }
-        else if(strcmp(msg, "Someone joined") == 0)
+        else if(strstr(msg, "new_client") != NULL)
         {
-            printf("\n");
+            char *sep = " ";
+            char *word, *brkt, *brkb;
+            char info[2][BUF_SIZE];
+
+            word = strtok_r(msg, sep, &brkt);
+            word = strtok_r(NULL, sep, &brkt);
+            for(int i = 0; i < 2; i++) 
+            {
+                strcpy(info[i], word);
+                word = strtok_r(NULL, sep, &brkt);
+            }
+
+            printf("%s %s joined\n", info[1], info[0]);
+            fflush(stdout);
+
         }
         else if(strcmp(msg, "file_share") == 0)
         {
@@ -244,6 +261,7 @@ void * recv_msg(void * arg)
         {
             msg[str_len] = '\0';
             printf("%s", msg);
+            fflush(stdout);
         }
     }
 }
